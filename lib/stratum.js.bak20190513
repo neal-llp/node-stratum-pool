@@ -5,7 +5,6 @@ var tls = require('tls');
 var fs = require('fs');
 
 var util = require('./util.js');
-var algos = require('stratum-pool/lib/algoProperties.js');
 
 var TLSoptions;
 
@@ -39,27 +38,21 @@ var StratumClient = function(options){
     var banning = options.banning;
     var _this = this;
     this.lastActivity = Date.now();
-	this.shouldNotAuth = false;
-	this.lastAuthTime = 0;
-	this.authInterval = 0;
     this.shares = {valid: 0, invalid: 0};
 
 
     var considerBan = (!banning || !banning.enabled) ? function(){ return false } : function(shareValid){
-        if (shareValid === true) 
-			_this.shares.valid++;
-        else
-			_this.shares.invalid++;
-		
+        if (shareValid === true) _this.shares.valid++;
+        else _this.shares.invalid++;
         var totalShares = _this.shares.valid + _this.shares.invalid;
-		if (banning.acl && banning.acl[_this.remoteAddress] === true){
-			return false;
-		}
-		else if (banning.acl && banning.acl[_this.remoteAddress] === false){
-            _this.emit('triggerBan', _this.shares.invalid + ' out of the last ' + totalShares + ' shares were invalid');
-            _this.socket.destroy();
-            return true;
-		}
+	if (banning.acl && banning.acl[_this.remoteAddress] === true){
+		return false;
+	}
+	else if (banning.acl && banning.acl[_this.remoteAddress] === false){
+                _this.emit('triggerBan', _this.shares.invalid + ' out of the last ' + totalShares + ' shares were invalid');
+                _this.socket.destroy();
+                return true;
+	}
         if (totalShares >= banning.checkThreshold){
             var percentBad = (_this.shares.invalid / totalShares) * 100;
             if (percentBad < banning.invalidPercent) //reset shares
@@ -152,37 +145,8 @@ var StratumClient = function(options){
     }
 
     function handleAuthorize(message) {
-		if (_this.shouldNotAuth){
-			return;
-		}
-		if(_this.authCount >= 3 && _this.authInterval < 30000){
-			_this.shouldNotAuth = true;
-			_this.emit('triggerBan', 'suspicious authorize behaviour');
-			options.socket.destroy();
-			return;
-		}
-		
-		var curWorkerName = getSafeWorkerString(message.params[0]);
-		
-		if (_this.workerName && curWorkerName !== _this.workerName){
-			_this.shouldNotAuth = true;
-			_this.emit('triggerBan', 'suspicious authorize behaviour');
-			options.socket.destroy();
-			return;
-		}
-		else{
-			_this.authCount ++;
-			let curTime = Date.now();
-			if (_this.authCount == 1){
-				_this.authInterval = 0;
-			}
-			else{
-				_this.authInterval = curTime - _this.lastAuthTime + _this.authInterval;
-			}
-			_this.lastAuthTime = curTime;
-		}
-		
-        _this.workerName = curWorkerName;
+
+        _this.workerName = getSafeWorkerString(message.params[0]);
         _this.workerPass = message.params[1];
 
         var addr = _this.workerName.split(".")[0];
@@ -195,10 +159,7 @@ var StratumClient = function(options){
                 result : _this.authorized,
                 error  : result.error
             });
-			if (result.ban === true) {
-				_this.shouldNotAuth = true;
-				_this.emit('triggerBan', result.msg);
-			}
+
             // If the authorizer wants us to close the socket lets do it.
             if (result.disconnect === true) {
                 options.socket.destroy();
@@ -281,9 +242,9 @@ var StratumClient = function(options){
         else{
             _this.emit('checkBan');
         }
-        socket.on('data', function(d){	
+        socket.on('data', function(d){
             dataBuffer += d;
-            if (Buffer.byteLength(dataBuffer, 'utf8') > 102400){ //100KB
+            if (new Buffer.byteLength(dataBuffer, 'utf8') > 10240){ //10KB
                 dataBuffer = '';
                 _this.emit('socketFlooded');
                 socket.destroy();
@@ -423,7 +384,6 @@ var StratumServer = exports.Server = function StratumServer(options, authorizeFn
     var subscriptionCounter = SubscriptionCounter(options.poolId || '');
     var rebroadcastTimeout;
     var bannedIPs = {};
-	var IPConnCount = {};	
 
 
     function checkBan(client) {
@@ -449,73 +409,8 @@ var StratumServer = exports.Server = function StratumServer(options, authorizeFn
         }
     }
 
-	function shouldRefuse(socket){
-		let banning = options.banning;
-		let ip = socket.remoteAddress
-		if (banning.acl && banning.acl[ip] === false){
-			_this.emit('refuse', ip, 'refuse ip in black list : ' + ip, false);
-			socket.destroy();
-			return true;
-		}
-		if (!banning || !banning.enabled){
-			return false;
-		}
-		if (banning.acl[ip] === undefined){
-			if (ip in bannedIPs){
-				_this.emit('refuse', ip, 'refuse ip in bannedIPs list :' + ip, false);
-				socket.destroy();
-				return true;				
-			}
-			
-			let curTime = Date.now();			
-			let iac = IPConnCount[ip];
-			let connCount = options.refuse.shortCount || 50;
-			let connInterval = options.refuse.Interval || 250;
-			let connCountLong = options.refuse.LongCount || 200;
-			let statPeriod = options.refuse.statPeriod || 30000;
-			if (iac){
-				if (iac.count >= connCount && iac.connInterval < connInterval){
-					_this.emit('refuse', ip, 'refuse ip which connect too fast :' + ip, true);
-					bannedIPs[ip] = curTime;
-					delete IPConnCount[ip];
-					socket.destroy();
-					return true;					
-				}
-				else if (iac.count >= connCountLong){
-					_this.emit('refuse', ip, 'refuse ip which connect too many in 30s : ' + ip, true);
-					bannedIPs[ip] = curTime;
-					delete IPConnCount[ip];					
-					socket.destroy();
-					return true;	
-				}
-			}
-			if(!iac){
-				IPConnCount[ip] = {count:1, lastConn: curTime, ConnInterval: 0};
-			}
-			else{
-				if ( (curTime - iac.lastConn) > statPeriod ){
-					IPConnCount[ip] = {count:1, lastConn: curTime, ConnInterval: 0};
-				}
-				else{
-					IPConnCount[ip] = {
-						count: ++iac.count,
-						lastConn: curTime,
-						ConnInterval: (curTime - iac.lastConn) + iac.ConnInterval
-					};
-				}
-			}
-			return false;
-		}
-		else {
-			return false;
-		}		
-	}	
-	
-	
     this.handleNewClient = function (socket){
-		if(shouldRefuse(socket)){
-			return;
-		}
+
         socket.setKeepAlive(true);
         var subscriptionId = subscriptionCounter.next();
         var client = new StratumClient(
@@ -561,20 +456,15 @@ var StratumServer = exports.Server = function StratumServer(options, authorizeFn
     (function init(){
 
         //Interval to look through bannedIPs for old bans and remove them in order to prevent a memory leak
-		setInterval(function(){
-			if (options.banning && options.banning.enabled){
-				curTime = Date.now();
-				for (ip in bannedIPs){
-					var banTime = bannedIPs[ip];
-					if (curTime - banTime > options.banning.time*1000)
-						delete bannedIPs[ip];
-				}
-				for (ip in IPConnCount){
-					if (curTime - IPConnCount[ip].lastConn > 30000)
-						delete IPConnCount[ip];
-				}
-			}
-		}, 1000 * options.banning.purgeInterval);
+        if (options.banning && options.banning.enabled){
+            setInterval(function(){
+                for (ip in bannedIPs){
+                    var banTime = bannedIPs[ip];
+                    if (Date.now() - banTime > options.banning.time)
+                        delete bannedIPs[ip];
+                }
+            }, 1000 * options.banning.purgeInterval);
+        }
 
 
         //SetupBroadcasting();
